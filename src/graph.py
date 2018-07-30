@@ -1,35 +1,37 @@
 #!/usr/bin/env python
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from scipy.spatial import Delaunay, distance
 from time import time
-import mdptoolbox
+from sklearn import mixture
+import mdptoolbox, copy
 
-# '''
-#     This class has functions to automatically generate random graphs
-#     embedded in a n-dimensional space. The costs of edges
-#     in the graph will be represented by a set of weighted means and
-#     standard deviations. This is meant to represent distinct types of
-#     errors that cannot necesarrily be predicted before traversal of an edge
-#     but can be observed after many traversals of that edge.
-#
-#     Class variables:
-#         time: variable used for the method bridge
-#         bridges: list of bridges in the graph after the call of bridges
-#         V: the number of vertices in the graph
-#         graph: the dictionary representing the connections to each node
-#             The graph has the following structure:
-#             {v: {e: [(mean,std_dev,weight)], e: []}, v: {e: []}}
-#             where v is the vertice and e is an edge from that vertice
-#             and mean is the mean of one gaussian, std_dev is the standard
-#             deviation of that gaussian, and weight is the weight of that
-#             gaussian. The sum of weights for each gaussian in an edge must be
-#             1
-#         points: the coordinates of each point in the graph
-#         upper_bound: the maximum mean cost that will placed on an edge
-#         max_var: The maximum std_dev that a guassian describing an edge cost can have
-#         num_modes: the maximum number of gaussians describing an edge cost
-# '''
+'''
+    This class has functions to automatically generate random graphs
+    embedded in a n-dimensional space. The costs of edges
+    in the graph will be represented by a set of weighted means and
+    standard deviations. This is meant to represent distinct types of
+    errors that cannot necesarrily be predicted before traversal of an edge
+    but can be observed after many traversals of that edge.
+
+    Class variables:
+        time: variable used for the method bridge
+        bridges: list of bridges in the graph after the call of bridges
+        V: the number of vertices in the graph
+        graph: the dictionary representing the connections to each node
+            The graph has the following structure:
+            {v: {e: [(mean,std_dev,weight)], e: []}, v: {e: []}}
+            where v is the vertice and e is an edge from that vertice
+            and mean is the mean of one gaussian, std_dev is the standard
+            deviation of that gaussian, and weight is the weight of that
+            gaussian. The sum of weights for each gaussian in an edge must be
+            1
+        points: the coordinates of each point in the graph
+        upper_bound: the maximum mean cost that will placed on an edge
+        max_var: The maximum std_dev that a guassian describing an edge cost can have
+        num_modes: the maximum number of gaussians describing an edge cost
+'''
 class multimodal_graph:
     def __init__(self):
         self.time = 0
@@ -41,6 +43,7 @@ class multimodal_graph:
         self.max_var = 0.0
         self.num_modes = 3
         self.dims = None
+        self.imported_graph = None
 
     '''
         The generate function will generate the graph based on the parameters passed
@@ -55,7 +58,7 @@ class multimodal_graph:
         max_var: The maximum std_dev that a guassian describing an edge cost can have
         num_modes: the maximum number of gaussians describing an edge cost
     '''
-    def generate(self,vertices = 100, dims = [100,100], blowout = 0.5, upper_bound = 100, max_var = 5.0, num_modes = 3):
+    def generate(self,vertices = 100, dims = [(-100,100),(-100,100)], blowout = 0.5, upper_bound = 100, max_var = 5.0, num_modes = 3):
         self.graph = dict()
         np.random.seed(int(time()))
         self.V = vertices
@@ -66,7 +69,8 @@ class multimodal_graph:
 
         for i in range(self.V):
             self.graph[i] = dict()
-            self.points.append([float(j) * np.random.rand() for j in dims])
+            # self.points.append([float(j) * np.random.rand() for j in dims])
+            self.points.append([float(j - i) * np.random.rand() + float(i) for i,j in dims])
 
         self.points = np.array(self.points)
 
@@ -188,8 +192,9 @@ class multimodal_graph:
         start = self.points[i]
         end = self.points[j]
         low = distance.euclidean(start,end)
-        for i in range(self.num_modes):
-            if j < self.num_modes - 1:
+        n_modes = np.random.choice(range(1,self.num_modes))
+        for b in range(n_modes):
+            if b < n_modes - 1:
                 w = np.random.random() * weight
                 weight = weight - w
             else:
@@ -198,9 +203,9 @@ class multimodal_graph:
             var = None
             found = False
             while not found:
-                mean = (self.upper_bound - low)*np.random.random() + low
+                mean = (self.upper_bound)*np.random.random() + low
                 var = self.max_var*np.random.random()
-                if (mean - 3*var) > low:
+                if mean - (3*var) > low:
                     found = True
             gaussians.append((mean,var,w))
         return gaussians
@@ -419,46 +424,98 @@ class multimodal_graph:
             scores.append(sum(score))
         return scores
 
+    '''
+        import_graph will take in two arguments, one is the coordinates of the
+        points in the graph, their position in the list is the same index they
+        will be reffered to in the graph. The second argument is a dictionary
+        of the same format of the graph that will be generated, with the
+        exception that the list of gaussians describing the distribution will
+        be replaced with the list of samples experienced traversing that edge
+
+        The format of the graph would look as such:
+        {0: {2:[samples],3:[samples]}, 2: {0:[samples], ...}...}
+    '''
+    def import_graph(self,points,input_graph):
+        self.imported_graph = input_graph
+        self.points = points
+        self.graph = dict()
+        self.dims = len(points[0])
+        for l,i in enumerate(input_graph):
+            self.graph[i] = dict()
+            for k,j in enumerate(input_graph[i]):
+                self.graph[i][j] = self._get_gaussians(input_graph[i][j])
+
+    '''
+        _get_gaussians will take in a list of samples, and attempt to generate
+        a gaussian mixture model that adequately describes the gaussian in the
+        fewest components possible.
+
+        The return of the function is a list of gassians parameters in the form:
+        [(mean,std_dev, weight),...] where the weights sum to 1
+
+        Currently this is limited to 1D arrays of costs
+    '''
+    def _get_gaussians(self, samples):
+        gmm = None
+        best = -10000
+        data = np.array(samples).reshape(-1,1)
+        for i in range(1,self.num_modes):
+            if i > len(data):
+                continue
+            model = mixture.GaussianMixture(i)
+            model.fit(data)
+            score = model.score(data) - .05*i
+            if score > best:
+                best = score
+                gmm = copy.deepcopy(model)
+        gaussians = []
+        means = list(gmm.means_.flatten())
+        variances = list(gmm.covariances_.flatten())
+        weights = list(gmm.weights_)
+        for i in range(gmm.n_components):
+            gaussians.append((means[i],variances[i],weights[i]))
+        return gaussians
+
+    '''
+        demo will run on a blank instance of a graph, and will automatically
+        generate a graph, generate each type of mdp representation, and
+        graph the results of the policy
+    '''
+    def demo(self):
+        self.generate()
+        self.draw_graph()
+        plt.show(block = False)
+        plt.pause(2)
+
+        goal = 3
+        start = 0
+        modes = ['simple','simple_conservative','multimodal','multimodal_conservative']
+        lns = ['b-','g-','c-','k-']
+        legend_lines = [Line2D([0], [0], color='b', lw=2),
+                       Line2D([0], [0], color='g', lw=2),
+                       Line2D([0], [0], color='c', lw=2),
+                       Line2D([0], [0], color='k', lw=2),]
+        plt.legend(legend_lines, modes)
+
+        for mode, ln in [(modes[i],lns[i]) for i in range(len(modes))]:
+            pi = self.gen_policy(mode,goal)
+            self.draw_policy(pi,start,goal,ln)
+            plt.pause(2)
+
+        plt.pause(20)
+
+    '''
+        gen_policy will take in the mode of the type of mdp to generate,
+        and will return the policy to the goal
+    '''
+    def gen_policy(self,mode,goal):
+        P,R = self.generate_mdp(mode,goal)
+        pi = mdptoolbox.mdp.ValueIteration(P,R,0.99,max_iter = 1000)
+        pi.run()
+        return pi.policy
+
+
+
 if __name__ == "__main__":
     graph = multimodal_graph()
-    graph.generate(vertices = 5, blowout = 0.0)
-    graph.draw_graph()
-    plt.show(block = False)
-    plt.pause(2)
-
-    goal = 3
-    start = 0
-
-
-    P1,R1 = graph.generate_mdp('simple',goal)
-    pi1 = mdptoolbox.mdp.ValueIteration(P1,R1,0.99, max_iter=1000)
-    pi1.run()
-    graph.draw_policy(pi1.policy,start,goal, 'b-')
-    # plt.pause(2)
-
-    P2,R2 = graph.generate_mdp('simple_conservative',goal)
-    pi2 = mdptoolbox.mdp.ValueIteration(P2,R2,0.99, max_iter=1000)
-    pi2.run()
-    graph.draw_policy(pi2.policy,start,goal, 'g-')
-    # plt.pause(2)
-
-    P3,R3 = graph.generate_mdp('multimodal',goal)
-    for i in range(len(P3)):
-        for j in range(len(P3)):
-            if sum(P3[i][j]) < 1.0:
-                print sum(P3[i][j])
-                print i,j
-                print P3[i][j]
-    print graph.get_graph()
-    pi3 = mdptoolbox.mdp.ValueIteration(P3,R3,0.99, max_iter=1000)
-    pi3.run()
-    graph.draw_policy(pi3.policy,start,goal, 'c-')
-    plt.pause(2)
-
-    P4,R4 = graph.generate_mdp('multimodal_conservative',goal)
-    pi4 = mdptoolbox.mdp.ValueIteration(P4,R4,0.99, max_iter=1000)
-    pi4.run()
-    graph.draw_policy(pi4.policy,start,goal, 'k-')
-    plt.pause(2)
-
-    plt.pause(20)
+    graph.demo()

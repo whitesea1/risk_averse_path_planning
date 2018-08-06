@@ -6,6 +6,7 @@ from scipy.spatial import Delaunay, distance
 from time import time
 from sklearn import mixture
 import mdptoolbox, copy
+from math import sqrt
 
 '''
     This class has functions to automatically generate random graphs
@@ -28,7 +29,7 @@ import mdptoolbox, copy
             gaussian. The sum of weights for each gaussian in an edge must be
             1
         points: the coordinates of each point in the graph
-        upper_bound: the maximum mean cost that will placed on an edge
+        multiplier: the maximum mean cost that will placed on an edge
         max_var: The maximum std_dev that a guassian describing an edge cost can have
         num_modes: the maximum number of gaussians describing an edge cost
 '''
@@ -39,7 +40,7 @@ class multimodal_graph:
         self.V = None
         self.graph = dict()
         self.points = []
-        self.upper_bound = 100
+        self.multiplier = 3
         self.max_var = 0.0
         self.num_modes = 3
         self.dims = None
@@ -57,12 +58,15 @@ class multimodal_graph:
         upper_bound: the maximum mean cost that will placed on an edge
         max_var: The maximum std_dev that a guassian describing an edge cost can have
         num_modes: the maximum number of gaussians describing an edge cost
+
+        Note: a blowout value of 0.0 will cause the multimodal mdp representation
+        to generate a policy that gets stuck in a loop. No idea why
     '''
-    def generate(self,vertices = 100, dims = [(-100,100),(-100,100)], blowout = 0.5, upper_bound = 100, max_var = 5.0, num_modes = 3):
+    def generate(self,vertices = 100, dims = [(-100,100),(-100,100)], blowout = 0.5, multiplier = 100, max_var = 5.0, num_modes = 3):
         self.graph = dict()
         np.random.seed(int(time()))
         self.V = vertices
-        self.upper_bound = upper_bound
+        self.multiplier = multiplier
         self.max_var = max_var
         self.num_modes = num_modes
         self.dims = len(dims)
@@ -203,7 +207,7 @@ class multimodal_graph:
             var = None
             found = False
             while not found:
-                mean = (self.upper_bound)*np.random.random() + low
+                mean = (self.multiplier*low)*np.random.random() + low
                 var = self.max_var*np.random.random()
                 if mean - (3*var) > low:
                     found = True
@@ -264,6 +268,7 @@ class multimodal_graph:
         vertice on the graph
     '''
     def generate_mdp(self, representation, goal):
+        goal = int(goal)
         graph = self.graph
         '''
         Need to define the transitions and the rewards for each state. the state transition function
@@ -315,7 +320,7 @@ class multimodal_graph:
                             R[q,i,keys[(i,q,e)]] = -1.0 * graph[i][q][e][0]
                             for w in range(n):
                                 P[w,keys[(i,q,e)],q] = 1.0
-                                R[w,keys[(i,q,e)],q] = 0.0
+                                R[w,keys[(i,q,e)],q] = 0
                     else:
                         P[q,i,i] = 1.0
                         R[q,i,i] = -1000
@@ -341,7 +346,7 @@ class multimodal_graph:
                         for t in range(1000):
                             for p in range(len(graph[i][q])):
                                 samples.append(np.random.normal(graph[i][q][p][0],graph[i][q][p][1],1)[0])
-                        exp = sum([graph[i][q][e][0]*graph[i][q][e][2] for e in range(len(graph[i][q]))]) + np.std(np.array(samples), axis=0)
+                        exp = sum([graph[i][q][e][0]*graph[i][q][e][2] for e in range(len(graph[i][q]))]) + 3*np.std(np.array(samples), axis=0)
                         R[i,q] = -1.0*exp
                         # if q == goal:
                         #     R[i,q] = R[i,q]
@@ -375,10 +380,10 @@ class multimodal_graph:
                         # we have to define all the transitions
                         for e in range(len(graph[i][q])):
                             P[q,i,keys[(i,q,e)]] = graph[i][q][e][2]
-                            R[q,i,keys[(i,q,e)]] = -1.0 * (graph[i][q][e][0] + graph[i][q][e][1])
+                            R[q,i,keys[(i,q,e)]] = -1.0 * (graph[i][q][e][0] + 3*graph[i][q][e][1])
                             for w in range(n):
                                 P[w,keys[(i,q,e)],q] = 1.0
-                                R[w,keys[(i,q,e)],q] = 0.0
+                                R[w,keys[(i,q,e)],q] = 0
                     else:
                         P[q,i,i] = 1.0
                         R[q,i,i] = -1000
@@ -404,7 +409,7 @@ class multimodal_graph:
     def simulate_policy(self,policy,start,runs = 1000):
         scores = []
         for i in range(runs):
-            i = initial
+            i = start
             score = []
             while i != policy[i]:
                 samples = []
@@ -419,6 +424,7 @@ class multimodal_graph:
                         if n > 0:
                             sampled = True
                     samples.append(n)
+
 
                 score.append(np.random.choice(samples,p = [k[2] for k in self.graph[start][end]]))
             scores.append(sum(score))
@@ -471,6 +477,7 @@ class multimodal_graph:
         gaussians = []
         means = list(gmm.means_.flatten())
         variances = list(gmm.covariances_.flatten())
+        variances = [sqrt(i) for i in variances]
         weights = list(gmm.weights_)
         for i in range(gmm.n_components):
             gaussians.append((means[i],variances[i],weights[i]))
@@ -489,8 +496,8 @@ class multimodal_graph:
 
         goal = 3
         start = 0
-        modes = ['simple','simple_conservative','multimodal','multimodal_conservative']
         lns = ['b-','g-','c-','k-']
+        modes = ['simple','simple_conservative','multimodal','multimodal_conservative']
         legend_lines = [Line2D([0], [0], color='b', lw=2),
                        Line2D([0], [0], color='g', lw=2),
                        Line2D([0], [0], color='c', lw=2),
@@ -510,7 +517,7 @@ class multimodal_graph:
     '''
     def gen_policy(self,mode,goal):
         P,R = self.generate_mdp(mode,goal)
-        pi = mdptoolbox.mdp.ValueIteration(P,R,0.99,max_iter = 1000)
+        pi = mdptoolbox.mdp.PolicyIteration(P,R,0.99999, max_iter=10000)
         pi.run()
         return pi.policy
 
